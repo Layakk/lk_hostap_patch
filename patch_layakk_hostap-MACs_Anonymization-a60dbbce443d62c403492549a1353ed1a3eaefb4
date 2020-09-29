@@ -1,0 +1,30 @@
+diff --git a/hostapd/Makefile b/hostapd/Makefile
+index e231e74..e6d38ee 100644
+--- a/hostapd/Makefile
++++ b/hostapd/Makefile
+@@ -15,6 +15,9 @@ export BINDIR ?= /usr/local/bin/
+ # directory if your C library does not include all header files.
+ # CFLAGS += -DUSE_KERNEL_HEADERS -I/usr/src/linux/include
+ 
++# Uncomment the following line if you want MAC addresses to be anonymized
++#CFLAGS += -DANONYMIZE_MACADDRS
++
+ -include .config
+ 
+ ifdef CONFIG_TESTING_OPTIONS
+diff --git a/src/utils/common.h b/src/utils/common.h
+index 449fa3a..caa6f85 100644
+--- a/src/utils/common.h
++++ b/src/utils/common.h
+@@ -423,7 +423,11 @@ void perror(const char *s);
+ #endif /* CONFIG_ANSI_C_EXTRA */
+ 
+ #ifndef MAC2STR
++#ifdef ANONYMIZE_MACADDRS
++#define MAC2STR(a) (a)[0], 0, 0, 0, 0, (a)[5]
++#else
+ #define MAC2STR(a) (a)[0], (a)[1], (a)[2], (a)[3], (a)[4], (a)[5]
++#endif /* ANONYMIZE_MACADDRS */
+ #define MACSTR "%02x:%02x:%02x:%02x:%02x:%02x"
+ 
+ /*

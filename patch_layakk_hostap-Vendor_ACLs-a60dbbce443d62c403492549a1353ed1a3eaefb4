@@ -1,0 +1,633 @@
+diff --git a/hostapd/config_file.c b/hostapd/config_file.c
+index 99cd052..91af266 100644
+--- a/hostapd/config_file.c
++++ b/hostapd/config_file.c
+@@ -208,6 +208,152 @@ static int hostapd_config_read_maclist(const char *fname,
+ 	return 0;
+ }
+ 
++static int hostapd_config_build_vendor_maclist(const char *fname, const char *vendor2mac_fname,
++				       struct mac_acl_entry **acl, int *num)
++{
++FILE *f, *trans_f;
++char buf[128], trans_buf[160];
++int line = 0;
++char *vendor_mac;
++char vendor_name[128];
++char *pos, *vname_ini_pos;
++int vname_len;
++u8 vendor_addr[ETH_ALEN];
++int vlan_id;
++struct mac_acl_entry *newacl;
++int index;
++	
++	vendor_mac=strdup("FF:FF:FF:FF:FF:FF");
++	if (!fname)
++		return 0;
++	if (!vendor2mac_fname) {
++		wpa_printf(MSG_ERROR, "Vendor file with vendor MACs not supplied!");
++		return -1;
++	}
++	trans_f = fopen(vendor2mac_fname, "r");
++	if (!trans_f) {
++		wpa_printf(MSG_ERROR, "Could not open file containing vendor MAC list '%s'.", vendor2mac_fname);
++		return -1;
++	}
++	f = fopen(fname, "r");
++	if (!f) {
++		wpa_printf(MSG_ERROR, "Vendor list file '%s' not found.", fname);
++		return -1;
++	}
++	
++	while (fgets(buf, sizeof(buf), f)) {
++		line++;
++
++		if (buf[0] == '#')
++			continue;
++		pos=buf;
++		while (*pos != '\0') {
++			if (*pos == '\n') {
++				*pos = '\0';
++				break;
++			}
++			pos++;
++		}
++		if (buf[0] == '\0')
++			continue;
++
++		rewind(trans_f);
++		while (fgets(trans_buf, sizeof(trans_buf), trans_f)) {
++			if (trans_buf[0] == '#' || trans_buf[0] == '\n')
++				continue;
++			pos=trans_buf;
++			while (*pos != '\0') {
++				if (*pos == '\n') {
++					*pos = '\0';
++					break;
++				}
++				if (*pos == '-' && pos-trans_buf < 17) {
++					*pos = ':';
++				}
++				pos++;
++			}
++			if (trans_buf[0] == '\0')
++				continue;
++			if (strlen(trans_buf)<8) {
++				wpa_printf(MSG_ERROR, "Invalid line (no vendor MAC found) in vendor MAC list file. Line: %s",trans_buf);
++				continue;
++			}
++			strncpy(vendor_mac,"00:00:00:00:00:00",17);
++			index=0;
++			while (index<17) {
++				if (*(trans_buf+index) != '/' && *(trans_buf+index) != '\t' && *(trans_buf+index) != ' ' && *(trans_buf+index) != '\n' ) {
++					if ( (*(trans_buf+index)>='0' && *(trans_buf+index)<='9') || (*(trans_buf+index) >= 'a' && *(trans_buf+index) <= 'f') || (*(trans_buf+index) >= 'A' && *(trans_buf+index) <= 'F') || *(trans_buf+index)==':' ) {
++						memcpy(vendor_mac+index, trans_buf+index,1);
++						index++;
++					} else {
++						wpa_printf(MSG_ERROR, "Invalid line (invalid MAC) in vendor MAC list file. Line: %s",trans_buf);
++						index=0;
++						break;
++					}
++				} else {
++					break;
++				}
++			}
++			if (index==0) continue;
++			/* At this point vendor_mac has a MAC address mask filled
++			with 0's */
++			/* Ignore mask number if any */
++			if (*pos == '/') {
++				pos++;
++				while (*pos>='0' && *pos<='9') {
++					pos++;
++				}
++			}
++
++			pos = trans_buf+index;
++			vname_len=0;
++			while (*pos == '\t' || *pos == ' ') {
++				pos++;
++			}
++			if (*pos == '\0') {
++				wpa_printf(MSG_ERROR, "Invalid line (no vendor name found) in vendor MAC list file. Line: %s",trans_buf);
++				continue;
++			}
++			vname_ini_pos = pos;
++			vname_len = 0;
++			while (*pos != '\t' && *pos != ' ' && *pos != '\0') {
++				pos++;
++				vname_len++;
++			}
++			if (vname_len>sizeof(vendor_name)-1) {
++				wpa_printf(MSG_ERROR, "Invalid line (vendor name too long) in vendor MAC list file. Line: %s",trans_buf);
++				continue;
++			}
++			strncpy(vendor_name,vname_ini_pos,vname_len);
++			vendor_name[vname_len]='\0';
++			
++			if (strncmp(buf,vendor_name,sizeof(vendor_name))==0) {
++				if (hwaddr_aton(vendor_mac, vendor_addr)) {
++					wpa_printf(MSG_ERROR, "Invalid line (invalid MAC address) in vendor MAC list file. Line: %s",trans_buf);
++					continue;
++				}
++				vlan_id=0;
++				newacl = os_realloc_array(*acl, *num + 1, sizeof(**acl));
++				if (newacl == NULL) {
++					wpa_printf(MSG_ERROR, "MAC list reallocation failed");
++					fclose(f);
++					fclose(trans_f);
++					return -1;
++				}
++				*acl = newacl;
++				os_memcpy((*acl)[*num].addr, vendor_addr, ETH_ALEN);
++				(*acl)[*num].vlan_id = vlan_id;
++				(*num)++;
++			}
++		}
++	}
++	fclose(f);
++	fclose(trans_f);
++
++	qsort(*acl, *num, sizeof(**acl), hostapd_acl_comp);
++
++	return 0;
++}
+ 
+ #ifdef EAP_SERVER
+ static int hostapd_config_read_eap_user(const char *fname,
+@@ -1917,6 +2063,16 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 			wpa_printf(MSG_ERROR, "Line %d: unknown macaddr_acl %d",
+ 				   line, bss->macaddr_acl);
+ 		}
++	} else if (os_strcmp(buf, "vendor_acl") == 0) {
++		bss->vendor_acl = atoi(pos);
++		if (bss->macaddr_acl != ACCEPT_UNLESS_DENIED &&
++		    bss->macaddr_acl != DENY_UNLESS_ACCEPTED) {
++			wpa_printf(MSG_ERROR, "Line %d: unknown vendor_acl %d",
++				   line, bss->vendor_acl);
++		}
++	} else if (os_strcmp(buf, "vendor_to_mac_file") == 0) {
++		os_free(bss->vendor_to_mac_filename);
++		bss->vendor_to_mac_filename = os_strdup(pos);
+ 	} else if (os_strcmp(buf, "accept_mac_file") == 0) {
+ 		if (hostapd_config_read_maclist(pos, &bss->accept_mac,
+ 						&bss->num_accept_mac)) {
+@@ -1931,6 +2087,18 @@ static int hostapd_config_fill(struct hostapd_config *conf,
+ 				   line, pos);
+ 			return 1;
+ 		}
++	} else if (os_strcmp(buf, "accept_vendor_file") == 0) {
++		if (hostapd_config_build_vendor_maclist(pos, bss->vendor_to_mac_filename, &bss->accept_vendor_mac, &bss->num_accept_vendor_mac)) {
++			wpa_printf(MSG_ERROR, "Line %d: Failed to read accept_vendor_file '%s'",
++				   line, pos);
++			return 1;
++		}
++	} else if (os_strcmp(buf, "deny_vendor_file") == 0) {
++		if (hostapd_config_build_vendor_maclist(pos, bss->vendor_to_mac_filename, &bss->deny_vendor_mac, &bss->num_deny_vendor_mac)) {
++			wpa_printf(MSG_ERROR, "Line %d: Failed to read deny_vendor_file '%s'",
++				   line, pos);
++			return 1;
++		}
+ 	} else if (os_strcmp(buf, "wds_sta") == 0) {
+ 		bss->wds_sta = atoi(pos);
+ 	} else if (os_strcmp(buf, "start_disabled") == 0) {
+diff --git a/hostapd/ctrl_iface.c b/hostapd/ctrl_iface.c
+index bef16b1..94e2777 100644
+--- a/hostapd/ctrl_iface.c
++++ b/hostapd/ctrl_iface.c
+@@ -1290,7 +1290,7 @@ static int hostapd_ctrl_iface_set(struct hostapd_data *hapd, char *cmd)
+ 				if (hostapd_maclist_found(
+ 					    hapd->conf->deny_mac,
+ 					    hapd->conf->num_deny_mac, sta->addr,
+-					    &vlan_id) &&
++					    &vlan_id, FALSE) &&
+ 				    (!vlan_id || vlan_id == sta->vlan_id))
+ 					ap_sta_disconnect(
+ 						hapd, sta, sta->addr,
+@@ -1302,7 +1302,7 @@ static int hostapd_ctrl_iface_set(struct hostapd_data *hapd, char *cmd)
+ 				if (!hostapd_maclist_found(
+ 					    hapd->conf->accept_mac,
+ 					    hapd->conf->num_accept_mac,
+-					    sta->addr, &vlan_id) ||
++					    sta->addr, &vlan_id, FALSE) ||
+ 				    (vlan_id && vlan_id != sta->vlan_id))
+ 					ap_sta_disconnect(
+ 						hapd, sta, sta->addr,
+diff --git a/hostapd/hostapd.conf b/hostapd/hostapd.conf
+index b370f21..baa8150 100644
+--- a/hostapd/hostapd.conf
++++ b/hostapd/hostapd.conf
+@@ -233,6 +233,25 @@ macaddr_acl=0
+ #accept_mac_file=/etc/hostapd.accept
+ #deny_mac_file=/etc/hostapd.deny
+ 
++# Vendor -based authentication
++# Please note that this kind of access control requires a driver that uses
++# hostapd to take care of management frame processing and as such, this can be
++# used with driver=hostap or driver=nl80211, but not with driver=madwifi.
++# 0 = accept unless in deny list
++# 1 = deny unless in accept list
++vendor_acl=0
++
++# Accept/deny vendor lists are read from separate files (containing list of
++# vendor names that are transformed into vendor mac addresses by the use of 
++# the vendor mac file)
++# The vendor list file must have similar format to /usr/share/wireshark/manuf
++# Be sure to use full path names and to specify a vendor_to_mac_file BEFORE 
++# accept_vendor_file / deny_vendor_file
++vendor_to_mac_file=/usr/share/wireshark/manuf
++#accept_vendor_file=/etc/hostapd.vendor.accept
++#deny_vendor_file=/etc/hostapd.vendor.deny
++
++
+ # IEEE 802.11 specifies two authentication algorithms. hostapd can be
+ # configured to allow both of these or only one. Open system authentication
+ # should be used with IEEE 802.1X.
+diff --git a/src/ap/ap_config.c b/src/ap/ap_config.c
+index 1c0ed7a..676711a 100644
+--- a/src/ap/ap_config.c
++++ b/src/ap/ap_config.c
+@@ -590,16 +590,20 @@ void hostapd_config_free(struct hostapd_config *conf)
+  * Perform a binary search for given MAC address from a pre-sorted list.
+  */
+ int hostapd_maclist_found(struct mac_acl_entry *list, int num_entries,
+-			  const u8 *addr, int *vlan_id)
++			  const u8 *addr, int *vlan_id, Boolean is_vendor)
+ {
+ 	int start, end, middle, res;
+ 
+ 	start = 0;
+ 	end = num_entries - 1;
+-
++	
+ 	while (start <= end) {
+ 		middle = (start + end) / 2;
+-		res = os_memcmp(list[middle].addr, addr, ETH_ALEN);
++		if (is_vendor == FALSE) {
++			res = os_memcmp(list[middle].addr, addr, ETH_ALEN);
++		} else {
++			res = hwaddr_vendor_cmp(list[middle].addr, addr);
++		}
+ 		if (res == 0) {
+ 			if (vlan_id)
+ 				*vlan_id = list[middle].vlan_id;
+diff --git a/src/ap/ap_config.h b/src/ap/ap_config.h
+index e5215c5..4040ad5 100644
+--- a/src/ap/ap_config.h
++++ b/src/ap/ap_config.h
+@@ -271,11 +271,18 @@ struct hostapd_bss_config {
+ 		ACCEPT_UNLESS_DENIED = 0,
+ 		DENY_UNLESS_ACCEPTED = 1,
+ 		USE_EXTERNAL_RADIUS_AUTH = 2
+-	} macaddr_acl;
++	} macaddr_acl, vendor_acl;
+ 	struct mac_acl_entry *accept_mac;
+ 	int num_accept_mac;
+ 	struct mac_acl_entry *deny_mac;
+ 	int num_deny_mac;
++
++	char *vendor_to_mac_filename;
++	struct mac_acl_entry *accept_vendor_mac;
++	int num_accept_vendor_mac;
++	struct mac_acl_entry *deny_vendor_mac;
++	int num_deny_vendor_mac;
++
+ 	int wds_sta;
+ 	int isolate;
+ 	int start_disabled;
+@@ -651,7 +658,7 @@ void hostapd_config_free_eap_user(struct hostapd_eap_user *user);
+ void hostapd_config_free_bss(struct hostapd_bss_config *conf);
+ void hostapd_config_free(struct hostapd_config *conf);
+ int hostapd_maclist_found(struct mac_acl_entry *list, int num_entries,
+-			  const u8 *addr, int *vlan_id);
++			  const u8 *addr, int *vlan_id, Boolean is_vendor);
+ int hostapd_rate_found(int *list, int rate);
+ const u8 * hostapd_get_psk(const struct hostapd_bss_config *conf,
+ 			   const u8 *addr, const u8 *p2p_dev_addr,
+diff --git a/src/ap/beacon.c b/src/ap/beacon.c
+index b0a74e0..ba7a45b 100644
+--- a/src/ap/beacon.c
++++ b/src/ap/beacon.c
+@@ -579,6 +579,42 @@ void handle_probe_req(struct hostapd_data *hapd,
+ 		return;
+ 	}
+ 
++	// We don't even reply to blacklisted clients
++	int vlan_id = 0;
++	if (hapd->conf->macaddr_acl == ACCEPT_UNLESS_DENIED) {
++		if (hostapd_maclist_found(hapd->conf->deny_mac,
++                                  	hapd->conf->num_deny_mac, mgmt->sa, &vlan_id, FALSE)) {
++			//wpa_printf(MSG_INFO, "Ignoring probe request from denied station " MACSTR,
++			//	   MAC2STR(mgmt->sa));
++                	return;
++		}
++	}
++	if (hapd->conf->macaddr_acl == DENY_UNLESS_ACCEPTED) {
++		if (!hostapd_maclist_found(hapd->conf->accept_mac,
++                                  	hapd->conf->num_accept_mac, mgmt->sa, &vlan_id, FALSE)) {
++			//wpa_printf(MSG_INFO, "Ignoring probe request from denied station " MACSTR,
++			//	   MAC2STR(mgmt->sa));
++                	return;
++		}
++	}
++	if (hapd->conf->vendor_acl == ACCEPT_UNLESS_DENIED) {
++		if (hostapd_maclist_found(hapd->conf->deny_vendor_mac,
++                                  	hapd->conf->num_deny_vendor_mac, mgmt->sa, &vlan_id, TRUE)) {
++			//wpa_printf(MSG_INFO, "Ignoring probe request from denied vendor station " MACSTR,
++			//	   MAC2STR(mgmt->sa));
++                	return;
++		}
++	}
++	if (hapd->conf->vendor_acl == DENY_UNLESS_ACCEPTED) {
++		if (!hostapd_maclist_found(hapd->conf->accept_vendor_mac,
++                                  	hapd->conf->num_accept_vendor_mac, mgmt->sa, &vlan_id, TRUE)) {
++			//wpa_printf(MSG_INFO, "Ignoring probe request from denied vendor station " MACSTR,
++			//	   MAC2STR(mgmt->sa));
++                	return;
++		}
++	}
++	//
++
+ #ifdef CONFIG_P2P
+ 	if (hapd->p2p && elems.wps_ie) {
+ 		struct wpabuf *wps;
+diff --git a/src/ap/ieee802_11.c b/src/ap/ieee802_11.c
+index 89911b1..6220042 100644
+--- a/src/ap/ieee802_11.c
++++ b/src/ap/ieee802_11.c
+@@ -289,7 +289,7 @@ static void send_auth_reply(struct hostapd_data *hapd,
+ 	if (ies && ies_len)
+ 		os_memcpy(reply->u.auth.variable, ies, ies_len);
+ 
+-	wpa_printf(MSG_DEBUG, "authentication reply: STA=" MACSTR
++	wpa_printf(MSG_INFO, "authentication reply: STA=" MACSTR
+ 		   " auth_alg=%d auth_transaction=%d resp=%d (IE len=%lu)",
+ 		   MAC2STR(dst), auth_alg, auth_transaction,
+ 		   resp, (unsigned long) ies_len);
+@@ -886,7 +886,7 @@ static void handle_auth(struct hostapd_data *hapd,
+ 	u16 auth_alg, auth_transaction, status_code;
+ 	u16 resp = WLAN_STATUS_SUCCESS;
+ 	struct sta_info *sta = NULL;
+-	int res;
++	int res, res2;
+ 	u16 fc;
+ 	const u8 *challenge = NULL;
+ 	u32 session_timeout, acct_interim_interval;
+@@ -975,13 +975,25 @@ static void handle_auth(struct hostapd_data *hapd,
+ 	res = hostapd_allowed_address(hapd, mgmt->sa, (u8 *) mgmt, len,
+ 				      &session_timeout,
+ 				      &acct_interim_interval, &vlan_id,
+-				      &psk, &identity, &radius_cui);
++				      &psk, &identity, &radius_cui, FALSE);
++	res2 = hostapd_allowed_address(hapd, mgmt->sa, (u8 *) mgmt, len,
++				      &session_timeout,
++				      &acct_interim_interval, &vlan_id,
++				      &psk, &identity, &radius_cui, TRUE);
+ 
+-	if (res == HOSTAPD_ACL_REJECT) {
++	if (res == HOSTAPD_ACL_REJECT || res2 == HOSTAPD_ACL_REJECT) {
+ 		wpa_printf(MSG_INFO, "Station " MACSTR " not allowed to authenticate",
+ 			   MAC2STR(mgmt->sa));
++		if (res == HOSTAPD_ACL_REJECT)
++			wpa_printf(MSG_INFO, "(Forbidden MAC Address)");
++		if (res2 == HOSTAPD_ACL_REJECT)
++			wpa_printf(MSG_INFO, "(Forbidden Vendor)");
++		wpa_printf(MSG_INFO, "Ignoring authentication request.");
+ 		resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
+-		goto fail;
++		os_free(identity);
++		os_free(radius_cui);
++		hostapd_free_psk_list(psk);
++		return;
+ 	}
+ 	if (res == HOSTAPD_ACL_PENDING) {
+ 		wpa_printf(MSG_DEBUG, "Authentication frame from " MACSTR
+@@ -1556,6 +1568,8 @@ static void send_deauth(struct hostapd_data *hapd, const u8 *addr,
+ 	int send_len;
+ 	struct ieee80211_mgmt reply;
+ 
++	wpa_printf(MSG_INFO, "Send deauth");
++
+ 	os_memset(&reply, 0, sizeof(reply));
+ 	reply.frame_control =
+ 		IEEE80211_FC(WLAN_FC_TYPE_MGMT, WLAN_FC_STYPE_DEAUTH);
+@@ -1581,6 +1595,8 @@ static void send_assoc_resp(struct hostapd_data *hapd, struct sta_info *sta,
+ 	struct ieee80211_mgmt *reply;
+ 	u8 *p;
+ 
++	wpa_printf(MSG_INFO, "Send assoc response");
++
+ 	os_memset(buf, 0, sizeof(buf));
+ 	reply = (struct ieee80211_mgmt *) buf;
+ 	reply->frame_control =
+@@ -1709,6 +1725,43 @@ static void handle_assoc(struct hostapd_data *hapd,
+ 		return;
+ 	}
+ 
++	// We don't even reply to blacklisted clients
++        int vlan_id = 0;
++	if (hapd->conf->macaddr_acl == ACCEPT_UNLESS_DENIED) {
++        	if (hostapd_maclist_found(hapd->conf->deny_mac,
++                                  hapd->conf->num_deny_mac, mgmt->sa, &vlan_id, FALSE)) {
++                	wpa_printf(MSG_INFO, "Ignoring association request from denied station " MACSTR,
++                           	MAC2STR(mgmt->sa));
++                	return;
++        	}
++	}
++	if (hapd->conf->macaddr_acl == DENY_UNLESS_ACCEPTED) {
++        	if (!hostapd_maclist_found(hapd->conf->accept_mac,
++                                  hapd->conf->num_accept_mac, mgmt->sa, &vlan_id, FALSE)) {
++                	wpa_printf(MSG_INFO, "Ignoring association request from not allowed station " MACSTR,
++                           	MAC2STR(mgmt->sa));
++                	return;
++        	}
++	}
++	if (hapd->conf->vendor_acl == ACCEPT_UNLESS_DENIED) {
++        	if (hostapd_maclist_found(hapd->conf->deny_vendor_mac,
++                                  	hapd->conf->num_deny_vendor_mac, mgmt->sa, &vlan_id, TRUE)) {
++                	wpa_printf(MSG_INFO, "Ignoring association request from denied vendor station " MACSTR,
++                           	MAC2STR(mgmt->sa));
++                	return;
++        	}
++	}
++	if (hapd->conf->vendor_acl == DENY_UNLESS_ACCEPTED) {
++        	if (!hostapd_maclist_found(hapd->conf->accept_vendor_mac,
++                                  	hapd->conf->num_accept_vendor_mac, mgmt->sa, &vlan_id, TRUE)) {
++                	wpa_printf(MSG_INFO, "Ignoring association request from not allowed vendor station " MACSTR,
++                           	MAC2STR(mgmt->sa));
++                	return;
++        	}
++	}
++        //
++
++
+ #ifdef CONFIG_TESTING_OPTIONS
+ 	if (reassoc) {
+ 		if (hapd->iconf->ignore_reassoc_probability > 0.0 &&
+@@ -2255,27 +2308,27 @@ int ieee802_11_mgmt(struct hostapd_data *hapd, const u8 *buf, size_t len,
+ 		ret = 1;
+ 		break;
+ 	case WLAN_FC_STYPE_ASSOC_REQ:
+-		wpa_printf(MSG_DEBUG, "mgmt::assoc_req");
++		wpa_printf(MSG_INFO, "mgmt::assoc_req");
+ 		handle_assoc(hapd, mgmt, len, 0);
+ 		ret = 1;
+ 		break;
+ 	case WLAN_FC_STYPE_REASSOC_REQ:
+-		wpa_printf(MSG_DEBUG, "mgmt::reassoc_req");
++		wpa_printf(MSG_INFO, "mgmt::reassoc_req");
+ 		handle_assoc(hapd, mgmt, len, 1);
+ 		ret = 1;
+ 		break;
+ 	case WLAN_FC_STYPE_DISASSOC:
+-		wpa_printf(MSG_DEBUG, "mgmt::disassoc");
++		wpa_printf(MSG_INFO, "mgmt::disassoc");
+ 		handle_disassoc(hapd, mgmt, len);
+ 		ret = 1;
+ 		break;
+ 	case WLAN_FC_STYPE_DEAUTH:
+-		wpa_msg(hapd->msg_ctx, MSG_DEBUG, "mgmt::deauth");
++		wpa_msg(hapd->msg_ctx, MSG_INFO, "mgmt::deauth");
+ 		handle_deauth(hapd, mgmt, len);
+ 		ret = 1;
+ 		break;
+ 	case WLAN_FC_STYPE_ACTION:
+-		wpa_printf(MSG_DEBUG, "mgmt::action");
++		wpa_printf(MSG_INFO, "mgmt::action");
+ 		ret = handle_action(hapd, mgmt, len);
+ 		break;
+ 	default:
+diff --git a/src/ap/ieee802_11_auth.c b/src/ap/ieee802_11_auth.c
+index 56c3ce0..44a79f8 100644
+--- a/src/ap/ieee802_11_auth.c
++++ b/src/ap/ieee802_11_auth.c
+@@ -233,8 +233,10 @@ int hostapd_allowed_address(struct hostapd_data *hapd, const u8 *addr,
+ 			    const u8 *msg, size_t len, u32 *session_timeout,
+ 			    u32 *acct_interim_interval, int *vlan_id,
+ 			    struct hostapd_sta_wpa_psk_short **psk,
+-			    char **identity, char **radius_cui)
++			    char **identity, char **radius_cui,
++			    Boolean is_vendor)
+ {
++int res;
+ 	if (session_timeout)
+ 		*session_timeout = 0;
+ 	if (acct_interim_interval)
+@@ -248,18 +250,37 @@ int hostapd_allowed_address(struct hostapd_data *hapd, const u8 *addr,
+ 	if (radius_cui)
+ 		*radius_cui = NULL;
+ 
+-	if (hostapd_maclist_found(hapd->conf->accept_mac,
+-				  hapd->conf->num_accept_mac, addr, vlan_id))
++	if ( is_vendor == FALSE ) {
++		res = hostapd_maclist_found(hapd->conf->accept_mac,
++				  hapd->conf->num_accept_mac, addr, vlan_id, is_vendor);
++	} else {
++		res = hostapd_maclist_found(hapd->conf->accept_vendor_mac,
++				  hapd->conf->num_accept_vendor_mac, addr, vlan_id, is_vendor);
++	}
++	if (res)
+ 		return HOSTAPD_ACL_ACCEPT;
+ 
+-	if (hostapd_maclist_found(hapd->conf->deny_mac,
+-				  hapd->conf->num_deny_mac, addr, vlan_id))
++	if ( is_vendor == FALSE ) {
++		res = hostapd_maclist_found(hapd->conf->deny_mac,
++				  hapd->conf->num_deny_mac, addr, vlan_id, is_vendor);
++	} else {
++		res = hostapd_maclist_found(hapd->conf->deny_vendor_mac,
++				  hapd->conf->num_deny_vendor_mac, addr, vlan_id, is_vendor);
++	}
++	if (res)
+ 		return HOSTAPD_ACL_REJECT;
+ 
+-	if (hapd->conf->macaddr_acl == ACCEPT_UNLESS_DENIED)
+-		return HOSTAPD_ACL_ACCEPT;
+-	if (hapd->conf->macaddr_acl == DENY_UNLESS_ACCEPTED)
+-		return HOSTAPD_ACL_REJECT;
++	if ( is_vendor == FALSE ) {
++		if (hapd->conf->macaddr_acl == ACCEPT_UNLESS_DENIED)
++			return HOSTAPD_ACL_ACCEPT;
++		if (hapd->conf->macaddr_acl == DENY_UNLESS_ACCEPTED)
++			return HOSTAPD_ACL_REJECT;
++	} else {
++		if (hapd->conf->vendor_acl == ACCEPT_UNLESS_DENIED)
++			return HOSTAPD_ACL_ACCEPT;
++		if (hapd->conf->vendor_acl == DENY_UNLESS_ACCEPTED)
++			return HOSTAPD_ACL_REJECT;
++	}
+ 
+ 	if (hapd->conf->macaddr_acl == USE_EXTERNAL_RADIUS_AUTH) {
+ #ifdef CONFIG_NO_RADIUS
+diff --git a/src/ap/ieee802_11_auth.h b/src/ap/ieee802_11_auth.h
+index 2bc1065..e2a47aa 100644
+--- a/src/ap/ieee802_11_auth.h
++++ b/src/ap/ieee802_11_auth.h
+@@ -20,7 +20,8 @@ int hostapd_allowed_address(struct hostapd_data *hapd, const u8 *addr,
+ 			    const u8 *msg, size_t len, u32 *session_timeout,
+ 			    u32 *acct_interim_interval, int *vlan_id,
+ 			    struct hostapd_sta_wpa_psk_short **psk,
+-			    char **identity, char **radius_cui);
++			    char **identity, char **radius_cui,
++			    Boolean is_vendor);
+ int hostapd_acl_init(struct hostapd_data *hapd);
+ void hostapd_acl_deinit(struct hostapd_data *hapd);
+ void hostapd_free_psk_list(struct hostapd_sta_wpa_psk_short *psk);
+diff --git a/src/utils/common.c b/src/utils/common.c
+index 93f1722..bd4fe15 100644
+--- a/src/utils/common.c
++++ b/src/utils/common.c
+@@ -54,7 +54,33 @@ static const char * hwaddr_parse(const char *txt, u8 *addr)
+ 	return txt;
+ }
+ 
++/**
++   hwaddr_vendor_cmp - Checks if a hw addres matches the vendor one.
++   In the vendor address, ending 0's are ignored, at a resolution of hex digit.
++ */
++int hwaddr_vendor_cmp(const u8 *vendor_addr, const u8 *addr) {
++int i,cmp_len=0;
++u8 e_vendor_addr[ETH_ALEN*2];
++u8 e_addr[ETH_ALEN*2];
++	
++	for (i=ETH_ALEN-1; i>=0; i--) {
++		e_addr[2*i]= (addr[i] >> 4);
++		e_addr[2*i+1]=addr[i] & 0x0F;
++		e_vendor_addr[2*i]= (vendor_addr[i] >> 4);
++		e_vendor_addr[2*i+1]=vendor_addr[i] & 0x0F;
++		if (cmp_len == 0) {
++			if ( e_vendor_addr[2*i] != 0 ) {
++				cmp_len = 2*i+1;
++			}
++			if ( e_vendor_addr[2*i+1] != 0 ) {
++				cmp_len = 2*i+2;
++			}
++		}
++	}
++	if (cmp_len == 0) cmp_len = 2 * ETH_ALEN;
+ 
++	return os_memcmp(e_vendor_addr,e_addr,cmp_len);
++}
+ /**
+  * hwaddr_aton - Convert ASCII string to MAC address (colon-delimited format)
+  * @txt: MAC address as a string (e.g., "00:11:22:33:44:55")
+diff --git a/src/utils/common.h b/src/utils/common.h
+index 82a51e5..449fa3a 100644
+--- a/src/utils/common.h
++++ b/src/utils/common.h
+@@ -329,6 +329,7 @@ static inline void WPA_PUT_LE64(u8 *a, u64 val)
+ 
+ #ifndef ETH_ALEN
+ #define ETH_ALEN 6
++#define ETH_AHALFLEN 3
+ #endif
+ #ifndef ETH_HLEN
+ #define ETH_HLEN 14
+@@ -471,6 +472,7 @@ typedef u64 __bitwise le64;
+ #endif /* __GNUC__ */
+ #endif /* __must_check */
+ 
++int hwaddr_vendor_cmp(const u8 *vendor_addr, const u8 *addr);
+ int hwaddr_aton(const char *txt, u8 *addr);
+ int hwaddr_masked_aton(const char *txt, u8 *addr, u8 *mask, u8 maskable);
+ int hwaddr_compact_aton(const char *txt, u8 *addr);
