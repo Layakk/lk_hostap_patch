@@ -1,2 +1,2 @@
 # lk_hostap_patch
-Modificación de hostap para permitir el filtrado de clientes por fabricante y la anonimización de MACs en los mensajes por pantalla y de log.
+Patch for hostap, to add client filtering based on vendors, and MAC anonymization on screen and log messages.
